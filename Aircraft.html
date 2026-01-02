@@ -3,78 +3,41 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aircraft Systems 3D (Fixed)</title>
+    <title>Aviation Lesson: The Propeller</title>
     <style>
-        body { margin: 0; overflow: hidden; font-family: sans-serif; background-color: #1a1a1a; }
-        
-        /* Loading / Error Screen */
-        #status-screen {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            color: white;
-            text-align: center;
-            background: rgba(0,0,0,0.8);
-            padding: 20px;
-            border-radius: 10px;
-            z-index: 9999;
-        }
-        .error-msg { color: #ff4444; font-weight: bold; margin-top: 10px; }
-
-        /* UI Panel */
-        #ui-panel {
+        body { margin: 0; overflow: hidden; font-family: 'Arial', sans-serif; }
+        #info {
             position: absolute;
             top: 10px;
             left: 10px;
-            width: 250px;
-            background: rgba(30, 30, 30, 0.9);
-            color: white;
+            background: rgba(255, 255, 255, 0.9);
             padding: 15px;
             border-radius: 8px;
-            border: 1px solid #444;
-            display: none; /* Hidden until loaded */
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            max-width: 300px;
         }
+        h1 { margin: 0 0 10px 0; font-size: 1.2em; color: #333; }
+        p { font-size: 0.9em; color: #555; }
+        .control-group { margin-top: 10px; }
+        label { font-size: 0.9em; font-weight: bold; }
         
-        button {
-            width: 100%;
-            margin-bottom: 5px;
-            padding: 8px;
-            background: #444;
-            color: white;
-            border: none;
-            cursor: pointer;
-            border-radius: 4px;
-        }
-        button:hover { background: #666; }
-        button.active { background: #4db8ff; color: black; font-weight: bold; }
-
-        /* Labels */
-        .label-tag {
-            background-color: rgba(0, 0, 0, 0.8);
-            border: 1px solid #4db8ff;
-            color: #4db8ff;
-            padding: 4px 8px;
+        /* 3D Label Styles */
+        .label {
+            color: #FFF;
+            font-family: sans-serif;
+            padding: 5px 10px;
+            background: rgba(0, 0, 0, 0.7);
             border-radius: 4px;
             font-size: 12px;
+            pointer-events: none; /* Let mouse clicks pass through */
+            white-space: nowrap;
+        }
+        .arrow-label {
+            color: yellow;
+            font-weight: bold;
         }
     </style>
-
-    <!-- Error Handling Script (Runs before everything) -->
-    <script>
-        window.onerror = function(message, source, lineno, colno, error) {
-            const status = document.getElementById('status-screen');
-            status.innerHTML = `
-                <h2>⚠️ Error Detected</h2>
-                <p>The 3D scene could not start.</p>
-                <div class="error-msg">${message}</div>
-                <p style="font-size:0.8em; color:#ccc;">Check your internet connection.<br>Make sure you didn't copy the markdown ticks (\`\`\`).</p>
-            `;
-            return false;
-        };
-    </script>
-
-    <!-- Import Map for Three.js -->
+    <!-- Import Map for Three.js (No build tools needed) -->
     <script type="importmap">
         {
             "imports": {
@@ -86,22 +49,16 @@
 </head>
 <body>
 
-    <!-- Loading Screen -->
-    <div id="status-screen">
-        <h2>Loading 3D Engine...</h2>
-        <p>Please wait while we fetch the library.</p>
-        <div id="loader" style="font-size: 20px;">⏳</div>
-    </div>
-
-    <!-- Interface -->
-    <div id="ui-panel">
-        <h3 style="margin-top:0;">Aircraft Systems</h3>
-        <button onclick="toggleSystem('fuel', this)" class="active">Fuel System (Blue)</button>
-        <button onclick="toggleSystem('elec', this)" class="active">Electrical (Yellow)</button>
-        <button onclick="toggleSystem('air', this)" class="active">Air System (Cyan)</button>
-        <button onclick="toggleSystem('gear', this)" class="active">Landing Gear</button>
-        <button onclick="toggleSystem('ctrl', this)" class="active">Flight Controls</button>
-        <p style="font-size:0.8em; color:#aaa;">Left Click: Rotate<br>Right Click: Pan<br>Scroll: Zoom</p>
+    <!-- User Interface -->
+    <div id="info">
+        <h1>Propeller Anatomy</h1>
+        <p>Rotate camera with mouse. Scroll to zoom.</p>
+        
+        <div class="control-group">
+            <label for="rpmSlider">RPM (Speed):</label><br>
+            <input type="range" id="rpmSlider" min="0" max="0.5" step="0.01" value="0.02">
+        </div>
+        <p style="font-size: 0.8em; color: red;">*Slow down to read labels!</p>
     </div>
 
     <script type="module">
@@ -109,212 +66,151 @@
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
-        // Variables
-        let scene, camera, renderer, labelRenderer, controls;
-        let airplaneGroup;
-        const systems = {}; 
-        const particles = [];
-        let time = 0;
+        // --- 1. SCENE SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Sky Blue background
 
-        try {
-            init();
-            // If we reached here, Three.js loaded!
-            document.getElementById('status-screen').style.display = 'none';
-            document.getElementById('ui-panel').style.display = 'block';
-            animate();
-        } catch (err) {
-            throw new Error("Initialization Failed: " + err.message);
-        }
+        // Camera
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(5, 3, 5);
 
-        function init() {
-            // 1. Scene
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x222222);
+        // Renderer (WebGL)
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
 
-            // 2. Camera
-            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
-            camera.position.set(6, 4, 6);
+        // Label Renderer (CSS2D - for HTML labels on top of 3D)
+        const labelRenderer = new CSS2DRenderer();
+        labelRenderer.setSize(window.innerWidth, window.innerHeight);
+        labelRenderer.domElement.style.position = 'absolute';
+        labelRenderer.domElement.style.top = '0px';
+        document.body.appendChild(labelRenderer.domElement);
 
-            // 3. Renderer
-            renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
+        // Controls
+        const controls = new OrbitControls(camera, labelRenderer.domElement);
+        controls.enableDamping = true;
 
-            // 4. Label Renderer
-            labelRenderer = new CSS2DRenderer();
-            labelRenderer.setSize(window.innerWidth, window.innerHeight);
-            labelRenderer.domElement.style.position = 'absolute';
-            labelRenderer.domElement.style.top = '0px';
-            labelRenderer.domElement.style.pointerEvents = 'none'; // CRITICAL FIX
-            document.body.appendChild(labelRenderer.domElement);
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
 
-            // 5. Controls
-            controls = new OrbitControls(camera, renderer.domElement);
-            controls.enableDamping = true;
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1);
+        sunLight.position.set(10, 20, 10);
+        sunLight.castShadow = true;
+        scene.add(sunLight);
 
-            // 6. Lights
-            const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-            scene.add(ambient);
-            const sun = new THREE.DirectionalLight(0xffffff, 1);
-            sun.position.set(5, 10, 5);
-            scene.add(sun);
+        // --- 2. PROPELLER CREATION ---
 
-            createAircraft();
-            createSystems();
-        }
+        // Group to hold the whole propeller assembly
+        const propellerGroup = new THREE.Group();
+        scene.add(propellerGroup);
 
-        function createAircraft() {
-            airplaneGroup = new THREE.Group();
-            scene.add(airplaneGroup);
+        // A. The Spinner/Hub (Central Cylinder)
+        const hubGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
+        const hubMaterial = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.8, roughness: 0.3 });
+        const hub = new THREE.Mesh(hubGeometry, hubMaterial);
+        hub.rotation.x = Math.PI / 2; // Lay it flat facing forward
+        hub.castShadow = true;
+        propellerGroup.add(hub);
 
-            // Glass Material
-            const glassMat = new THREE.MeshPhongMaterial({ 
-                color: 0x888888, 
-                transparent: true, 
-                opacity: 0.15,
-                side: THREE.DoubleSide
-            });
+        // B. The Blades
+        const bladeMaterial = new THREE.MeshStandardMaterial({ color: 0x222222 }); // Black blades
+        const tipMaterial = new THREE.MeshStandardMaterial({ color: 0xffcc00 }); // Yellow tips
 
-            // Fuselage
-            const body = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 6, 16), glassMat);
-            body.rotation.z = Math.PI / 2;
-            airplaneGroup.add(body);
+        function createBlade(angle) {
+            const bladeGroup = new THREE.Group();
 
-            // Wings
-            const wing = new THREE.Mesh(new THREE.BoxGeometry(2, 0.1, 9), glassMat);
-            airplaneGroup.add(wing);
-
-            // Tail
-            const tail = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.1, 3), glassMat);
-            tail.position.set(-2.5, 0, 0);
-            airplaneGroup.add(tail);
-            const vTail = new THREE.Mesh(new THREE.BoxGeometry(1.5, 2, 0.1), glassMat);
-            vTail.position.set(-2.5, 1, 0);
-            airplaneGroup.add(vTail);
-        }
-
-        function createSystems() {
-            // Helper to make lines
-            function makeLine(color, points) {
-                const curve = new THREE.CatmullRomCurve3(points);
-                const tube = new THREE.Mesh(
-                    new THREE.TubeGeometry(curve, 20, 0.05, 8, false),
-                    new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.4 })
-                );
-                
-                // Add particles
-                const pGeo = new THREE.SphereGeometry(0.08);
-                const pMat = new THREE.MeshBasicMaterial({ color: color });
-                for(let i=0; i<8; i++) {
-                    const p = new THREE.Mesh(pGeo, pMat);
-                    particles.push({ mesh: p, path: curve, offset: i/8 });
-                    tube.add(p);
-                }
-                return tube;
-            }
-
-            // 1. FUEL (Blue)
-            const fuel = new THREE.Group();
-            fuel.add(makeLine(0x0088ff, [
-                new THREE.Vector3(0, 0, 2), new THREE.Vector3(0, -0.2, 0), new THREE.Vector3(2.5, 0, 0)
-            ]));
-            fuel.add(makeLine(0x0088ff, [
-                new THREE.Vector3(0, 0, -2), new THREE.Vector3(0, -0.2, 0)
-            ]));
-            systems['fuel'] = fuel;
-            airplaneGroup.add(fuel);
-            addLabel("Fuel Tank", fuel, 0, 0.2, 2);
-
-            // 2. ELECTRICAL (Yellow)
-            const elec = new THREE.Group();
-            elec.add(makeLine(0xffff00, [
-                new THREE.Vector3(2, 0.3, 0), new THREE.Vector3(0, 0, 4)
-            ]));
-            elec.add(makeLine(0xffff00, [
-                new THREE.Vector3(2, 0.3, 0), new THREE.Vector3(0, 0, -4)
-            ]));
-            systems['elec'] = elec;
-            airplaneGroup.add(elec);
-            addLabel("Battery", elec, 2, 0.5, 0);
-
-            // 3. AIR (Cyan)
-            const air = new THREE.Group();
-            air.add(makeLine(0x00ffff, [
-                new THREE.Vector3(2.5, 0, 0), new THREE.Vector3(-1, 0.2, 0)
-            ]));
-            systems['air'] = air;
-            airplaneGroup.add(air);
-
-            // 4. GEAR
-            const gear = new THREE.Group();
-            const wGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.1, 16);
-            wGeo.rotateX(Math.PI/2);
-            const wMat = new THREE.MeshStandardMaterial({color:0x111111});
+            // Main blade part
+            const bladeGeo = new THREE.BoxGeometry(3.5, 0.4, 0.05);
+            // Shift geometry so rotation happens at the hub, not the center of the blade
+            bladeGeo.translate(2, 0, 0); 
             
-            const w1 = new THREE.Mesh(wGeo, wMat); w1.position.set(0.5, -0.8, 1.5); gear.add(w1);
-            const w2 = new THREE.Mesh(wGeo, wMat); w2.position.set(0.5, -0.8, -1.5); gear.add(w2);
-            const w3 = new THREE.Mesh(wGeo, wMat); w3.position.set(2, -0.8, 0); gear.add(w3);
+            const bladeMesh = new THREE.Mesh(bladeGeo, bladeMaterial);
             
-            systems['gear'] = gear;
-            airplaneGroup.add(gear);
+            // BLADE TWIST (PITCH): Rotate the blade slightly along its long axis
+            bladeMesh.rotation.x = Math.PI / 6; // 30 degrees pitch
+            
+            bladeGroup.add(bladeMesh);
 
-            // 5. CONTROLS
-            const ctrl = new THREE.Group();
-            const ail = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.05, 2), new THREE.MeshStandardMaterial({color:0x00ff00}));
-            ail.position.set(0, 0, 3.5);
-            ctrl.add(ail);
-            systems['ctrl'] = ctrl;
-            airplaneGroup.add(ctrl);
-            systems['ctrl'].animPart = ail; // Store for animation
+            // Blade Tip (Yellow)
+            const tipGeo = new THREE.BoxGeometry(0.5, 0.4, 0.05);
+            tipGeo.translate(4, 0, 0); // Position at end
+            const tipMesh = new THREE.Mesh(tipGeo, tipMaterial);
+            tipMesh.rotation.x = Math.PI / 6; // Same pitch
+            bladeGroup.add(tipMesh);
+
+            // Rotate the whole blade group around the hub
+            bladeGroup.rotation.z = angle;
+            
+            return bladeGroup;
         }
 
-        function addLabel(text, parent, x, y, z) {
+        // Add 2 Blades
+        const blade1 = createBlade(0);
+        const blade2 = createBlade(Math.PI); // 180 degrees opposite
+        propellerGroup.add(blade1);
+        propellerGroup.add(blade2);
+
+        // --- 3. LABELS (Educational Overlays) ---
+        
+        function addLabel(text, parentObject, x, y, z, customClass = 'label') {
             const div = document.createElement('div');
-            div.className = 'label-tag';
+            div.className = customClass;
             div.textContent = text;
             const label = new CSS2DObject(div);
             label.position.set(x, y, z);
-            parent.add(label);
+            parentObject.add(label);
+            return label;
         }
+
+        // Add static labels (attached to the group, they will spin with it)
+        addLabel("Hub", hub, 0, 0.5, 0);
+        
+        // Add detailed labels to Blade 1
+        // Note: Coordinates are relative to the blade group
+        addLabel("Leading Edge", blade1, 2.5, 0.5, 0.5);
+        addLabel("Trailing Edge", blade1, 2.5, -0.5, -0.5);
+        addLabel("Blade Tip", blade1, 4.2, 0, 0);
+
+        // Direction Arrow (Static in world space, roughly)
+        const dirDiv = document.createElement('div');
+        dirDiv.className = 'label arrow-label';
+        dirDiv.innerHTML = "Rotation &#10227;"; // Unicode arrow
+        const dirLabel = new CSS2DObject(dirDiv);
+        dirLabel.position.set(0, 2.5, 0);
+        scene.add(dirLabel);
+
+        // --- 4. ANIMATION LOOP ---
+        
+        const rpmSlider = document.getElementById('rpmSlider');
+        let speed = 0.02;
 
         function animate() {
             requestAnimationFrame(animate);
-            time += 0.01;
 
-            // Animate Particles
-            particles.forEach(p => {
-                if(p.mesh.parent.parent.visible) {
-                    const pos = p.path.getPoint((time + p.offset) % 1);
-                    p.mesh.position.copy(pos);
-                }
-            });
+            // Update Speed from Slider
+            speed = parseFloat(rpmSlider.value);
 
-            // Wiggle controls
-            if(systems['ctrl'].visible && systems['ctrl'].animPart) {
-                systems['ctrl'].animPart.rotation.x = Math.sin(time*5) * 0.5;
-            }
+            // Rotation Logic
+            propellerGroup.rotation.z -= speed; // Counter-clockwise rotation (standard aviation)
 
             controls.update();
             renderer.render(scene, camera);
             labelRenderer.render(scene, camera);
         }
 
-        // Global function for buttons
-        window.toggleSystem = function(name, btn) {
-            if(systems[name]) {
-                systems[name].visible = !systems[name].visible;
-                if(systems[name].visible) btn.classList.add('active');
-                else btn.classList.remove('active');
-            }
-        };
-
-        // Resize
+        // Handle Window Resize
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
             labelRenderer.setSize(window.innerWidth, window.innerHeight);
         });
+
+        // Start
+        animate();
+
     </script>
 </body>
 </html>
