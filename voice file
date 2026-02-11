@@ -1,0 +1,1220 @@
+import { useAuthStore } from '@/stores/authStore';
+import { AnimatePresence, motion } from 'framer-motion';
+import { Loader2, Mic, MicOff, Moon, PhoneOff, Sparkles, Sun, X, Move } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+interface VoiceAssistanceProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onThreadIdReceived?: (threadId: string) => void;
+  position?: 'center' | 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' | 'custom';
+  anchorRef?: React.RefObject<HTMLElement>;
+  customPosition?: {
+    top?: number | string;
+    bottom?: number | string;
+    left?: number | string;
+    right?: number | string;
+  };
+  draggable?: boolean;
+  autoCloseOnEndCall?: boolean;
+  closeDelayMs?: number;
+}
+
+interface TranscriptItem {
+  speaker: string;
+  text: string;
+  timestamp: Date;
+}
+
+type PositionState = {
+  top?: number;
+  bottom?: number;
+  left?: number;
+  right?: number;
+};
+
+export const VoiceAssistance: React.FC<VoiceAssistanceProps> = ({
+  isOpen,
+  onClose,
+  onThreadIdReceived,
+  position = 'center',
+  anchorRef,
+  customPosition,
+  draggable = true,
+  autoCloseOnEndCall = true,
+  closeDelayMs = 3000, // ✅ Increased to 3 seconds for better UX
+}) => {
+  const { authContext } = useAuthStore();
+
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [transcription, setTranscription] = useState<TranscriptItem[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [agentState, setAgentState] = useState<'idle' | 'listening' | 'thinking' | 'speaking'>('idle');
+  const [modulesLoaded, setModulesLoaded] = useState(false);
+  const [popupPosition, setPopupPosition] = useState<PositionState>({ bottom: 20, right: 20 });
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [threadId, setThreadId] = useState<string | null>(null);
+
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
+  const transcriptionEndRef = useRef<HTMLDivElement>(null);
+  const roomRef = useRef<any>(null);
+  const micTrackRef = useRef<any>(null);
+  const scriptsLoadedRef = useRef(false);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isMountedRef = useRef(true);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animationIdRef = useRef<number | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+
+  // Theme colors
+  const theme = isDarkMode ? {
+    bg: '#1a1a1a',
+    bgSecondary: '#2a2a2a',
+    border: '#3a3a3a',
+    text: '#e8e5e1',
+    textSecondary: '#a89176',
+    messageBg: '#2d2d2d',
+    systemBg: '#252525',
+  } : {
+    bg: '#E8E5E1',
+    bgSecondary: '#ebe8e4',
+    border: '#d4d0ca',
+    text: '#2a2522',
+    textSecondary: '#6b6560',
+    messageBg: '#F5F3F0',
+    systemBg: '#ddd9d3',
+  };
+
+  const calculateInitialPosition = useCallback((): PositionState => {
+    if (position === 'custom' && customPosition) {
+      const pos: PositionState = {};
+      if (typeof customPosition.top === 'number') pos.top = customPosition.top;
+      if (typeof customPosition.bottom === 'number') pos.bottom = customPosition.bottom;
+      if (typeof customPosition.left === 'number') pos.left = customPosition.left;
+      if (typeof customPosition.right === 'number') pos.right = customPosition.right;
+      return pos;
+    }
+
+    const presets: Record<string, PositionState> = {
+      'bottom-right': { bottom: 20, right: 20 },
+      'bottom-left': { bottom: 20, left: 20 },
+      'top-right': { top: 20, right: 20 },
+      'top-left': { top: 20, left: 20 },
+    };
+
+    return presets[position] || { bottom: 20, right: 20 };
+  }, [position, customPosition]);
+
+  useEffect(() => {
+    if (position !== 'center') {
+      if (position === 'bottom-right' && anchorRef?.current) {
+        const rect = anchorRef.current.getBoundingClientRect();
+        const gap = 16;
+        const popupHeight = 320;
+        const popupWidth = 380;
+
+        let bottom = window.innerHeight - rect.top + gap;
+        let right = window.innerWidth - rect.right;
+
+        const spaceAbove = rect.top - gap;
+        if (spaceAbove < popupHeight) {
+          const spaceBelow = window.innerHeight - rect.bottom - gap;
+          if (spaceBelow > spaceAbove) {
+            bottom = spaceBelow;
+          } else {
+            bottom = window.innerHeight / 2 - popupHeight / 2;
+          }
+        }
+
+        if (window.innerWidth - rect.right < popupWidth / 2) {
+          right = Math.min(right, 20);
+        }
+
+        const leftPosition = window.innerWidth - right - popupWidth;
+        if (leftPosition < 20) {
+          right = window.innerWidth - popupWidth - 20;
+        }
+
+        setPopupPosition({ bottom, right });
+      } else {
+        setPopupPosition(calculateInitialPosition());
+      }
+    }
+  }, [isOpen, position, anchorRef, calculateInitialPosition]);
+
+  useEffect(() => {
+    transcriptionEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [transcription]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    if (scriptsLoadedRef.current) {
+      setModulesLoaded(true);
+      return;
+    }
+
+    scriptsLoadedRef.current = true;
+
+    const script = document.createElement('script');
+    script.type = 'module';
+    script.innerHTML = `
+      import {
+        Room,
+        RoomEvent,
+        createLocalAudioTrack,
+        Track,
+        ConnectionState
+      } from "https://cdn.jsdelivr.net/npm/livekit-client@2.17.0/dist/livekit-client.esm.mjs";
+
+      window.livekitModules = {
+        Room,
+        RoomEvent,
+        createLocalAudioTrack,
+        Track,
+        ConnectionState
+      };
+      window.dispatchEvent(new Event('voice-modules-loaded'));
+    `;
+
+    const handleModulesLoaded = () => {
+      if (isMountedRef.current) {
+        setModulesLoaded(true);
+      }
+    };
+
+    window.addEventListener('voice-modules-loaded', handleModulesLoaded, { once: true });
+    document.head.appendChild(script);
+
+    return () => {
+      isMountedRef.current = false;
+      window.removeEventListener('voice-modules-loaded', handleModulesLoaded);
+      if (script.parentNode) {
+        document.head.removeChild(script);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (canvasRef.current) {
+      drawHexWave(0);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (position === 'center') return;
+
+    const handleResize = () => {
+      const popupWidth = 380;
+      const popupHeight = 400;
+
+      setPopupPosition(prev => {
+        const newPos: PositionState = {};
+
+        if (prev.bottom !== undefined) {
+          newPos.bottom = Math.max(10, Math.min(prev.bottom, window.innerHeight - popupHeight - 10));
+        }
+        if (prev.top !== undefined) {
+          newPos.top = Math.max(10, Math.min(prev.top, window.innerHeight - popupHeight - 10));
+        }
+        if (prev.right !== undefined) {
+          newPos.right = Math.max(10, Math.min(prev.right, window.innerWidth - popupWidth - 10));
+        }
+        if (prev.left !== undefined) {
+          newPos.left = Math.max(10, Math.min(prev.left, window.innerWidth - popupWidth - 10));
+        }
+
+        return { ...prev, ...newPos };
+      });
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [position]);
+
+  const handleDragStart = (e: React.MouseEvent) => {
+    if (!draggable || position === 'center') return;
+
+    e.preventDefault();
+    setIsDragging(true);
+
+    const rect = dialogRef.current?.getBoundingClientRect();
+    if (rect) {
+      setDragOffset({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      });
+    }
+  };
+
+  const handleDragMove = useCallback((e: MouseEvent) => {
+    if (!isDragging || !dialogRef.current) return;
+
+    const rect = dialogRef.current.getBoundingClientRect();
+    const popupWidth = rect.width;
+    const popupHeight = rect.height;
+
+    const newLeft = e.clientX - dragOffset.x;
+    const newTop = e.clientY - dragOffset.y;
+
+    const newBottom = window.innerHeight - newTop - popupHeight;
+    const newRight = window.innerWidth - newLeft - popupWidth;
+
+    const constrainedPos: PositionState = {
+      bottom: Math.max(10, Math.min(newBottom, window.innerHeight - popupHeight - 10)),
+      right: Math.max(10, Math.min(newRight, window.innerWidth - popupWidth - 10)),
+    };
+
+    setPopupPosition(constrainedPos);
+  }, [isDragging, dragOffset]);
+
+  const handleDragEnd = useCallback(() => {
+    setIsDragging(false);
+  }, []);
+
+  useEffect(() => {
+    if (isDragging) {
+      document.addEventListener('mousemove', handleDragMove);
+      document.addEventListener('mouseup', handleDragEnd);
+      return () => {
+        document.removeEventListener('mousemove', handleDragMove);
+        document.removeEventListener('mouseup', handleDragEnd);
+      };
+    }
+  }, [isDragging, handleDragMove, handleDragEnd]);
+
+  const addTranscription = useCallback((speaker: string, text: string) => {
+    if (isMountedRef.current) {
+      setTranscription(prev => [...prev, { speaker, text, timestamp: new Date() }]);
+    }
+  }, []);
+
+  const formatTime = (date: Date) => {
+    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const drawHexWave = (volume: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    const baseRadius = canvas.width / 2.7;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const sep = Math.min(volume * 30, 15);
+    drawSingleHex(ctx, cx - sep / 2, cy, baseRadius, 1, 2, volume);
+    drawSingleHex(ctx, cx + sep / 2, cy, baseRadius, 1, 3, volume);
+  };
+
+  const drawSingleHex = (
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    radius: number,
+    scale: number,
+    speedFactor: number,
+    volume: number
+  ) => {
+    ctx.beginPath();
+    const points = 120;
+    const sides = 6;
+
+    for (let i = 0; i <= points; i++) {
+      const angle = (i / points) * 2 * Math.PI;
+      const hexShape = Math.cos(sides * angle) * 0.2 + 0.8;
+      const deform = Math.sin(angle * sides + Date.now() * 0.002 * speedFactor) * volume * 10 * scale;
+      const r = radius + deform * hexShape;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+
+    ctx.closePath();
+
+    const gradient = ctx.createLinearGradient(cx - radius, cy, cx + radius, cy);
+    gradient.addColorStop(0, '#a89176');
+    gradient.addColorStop(1, '#8b7a63');
+
+    ctx.strokeStyle = gradient;
+    ctx.lineWidth = 2.5;
+    ctx.shadowColor = '#a89176';
+    ctx.shadowBlur = 20;
+    ctx.stroke();
+  };
+
+  const startVisualizer = async () => {
+    if (!isMuted && isConnected) {
+      try {
+        if (!mediaStreamRef.current) {
+          mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+
+        if (!audioContextRef.current) {
+          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+
+        if (audioContextRef.current.state === 'suspended') {
+          await audioContextRef.current.resume();
+        }
+
+        if (!analyserRef.current) {
+          analyserRef.current = audioContextRef.current.createAnalyser();
+          analyserRef.current.fftSize = 256;
+          const source = audioContextRef.current.createMediaStreamSource(mediaStreamRef.current);
+          source.connect(analyserRef.current);
+        }
+
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+
+        const animate = () => {
+          if (!isConnected || isMuted) {
+            drawHexWave(0);
+            return;
+          }
+
+          analyserRef.current!.getByteFrequencyData(dataArray);
+          const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+          const volume = avg / 256;
+
+          drawHexWave(volume);
+
+          animationIdRef.current = requestAnimationFrame(animate);
+        };
+
+        animate();
+
+      } catch (e) {
+        drawHexWave(0);
+      }
+    } else {
+      drawHexWave(0);
+    }
+  };
+
+  const stopVisualizer = () => {
+    if (animationIdRef.current) {
+      cancelAnimationFrame(animationIdRef.current);
+      animationIdRef.current = null;
+    }
+    drawHexWave(0);
+  };
+
+  const toggleMute = useCallback(async () => {
+    if (!micTrackRef.current || !isConnected) return;
+
+    try {
+      const newMutedState = !isMuted;
+
+      if (newMutedState) {
+        await micTrackRef.current.mute();
+        stopVisualizer();
+      } else {
+        await micTrackRef.current.unmute();
+        startVisualizer();
+      }
+
+      setIsMuted(newMutedState);
+    } catch (error) {
+      setError('Failed to toggle microphone');
+    }
+  }, [isMuted, isConnected]);
+
+  // ✅ Enhanced function to schedule auto-close with different delays
+  const scheduleAutoClose = useCallback((reason: string) => {
+    if (!autoCloseOnEndCall) {
+      console.log('⏸️ Auto-close disabled, not scheduling');
+      return;
+    }
+
+    // Clear any existing timeout
+    if (closeTimeoutRef.current) {
+      clearTimeout(closeTimeoutRef.current);
+      closeTimeoutRef.current = null;
+    }
+
+    // ✅ Different delays based on reason
+    const delay = reason === 'manual_end'
+      ? 1500  // Quick close if user manually ended
+      : reason === 'agent_disconnect'
+      ? closeDelayMs  // Use prop value for agent disconnect
+      : closeDelayMs;
+
+    console.log(`🔴 Scheduling auto-close in ${delay}ms - Reason: ${reason}`);
+
+    closeTimeoutRef.current = setTimeout(() => {
+      if (isMountedRef.current) {
+        console.log('🔴 AUTO-CLOSING POPUP NOW');
+        onClose();
+      } else {
+        console.log('⚠️ Component unmounted, skipping close');
+      }
+    }, delay);
+  }, [autoCloseOnEndCall, closeDelayMs, onClose]);
+
+  const stopVoiceSession = useCallback(() => {
+    console.log('🔴 stopVoiceSession called (manual end)');
+
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (closeTimeoutRef.current) {
+      clearTimeout(closeTimeoutRef.current);
+      closeTimeoutRef.current = null;
+    }
+
+    stopVisualizer();
+
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    analyserRef.current = null;
+
+    if (micTrackRef.current) {
+      try {
+        micTrackRef.current.stop();
+      } catch (e) {
+        // Handle silently
+      }
+      micTrackRef.current = null;
+    }
+
+    if (roomRef.current) {
+      try {
+        roomRef.current.removeAllListeners();
+        roomRef.current.disconnect();
+      } catch (e) {
+        // Handle silently
+      }
+      roomRef.current = null;
+    }
+
+    if (isMountedRef.current) {
+      setIsConnected(false);
+      setIsMuted(false);
+      setAgentState('idle');
+      setThreadId(null);
+      addTranscription('System', 'Call ended');
+
+      // Schedule auto-close for manual end
+      scheduleAutoClose('manual_end');
+    }
+  }, [addTranscription, scheduleAutoClose]);
+
+  const startVoiceSession = async () => {
+    if (!modulesLoaded) {
+      setError('Modules still loading. Please wait...');
+      return;
+    }
+
+    try {
+      if (!isMountedRef.current) return;
+      setIsConnecting(true);
+      setError(null);
+      setTranscription([]);
+      setIsMuted(false);
+
+      if (!authContext?.isAuthenticated || !authContext?.token) {
+        throw new Error('Not authenticated');
+      }
+
+      const apiBase = 'http://127.0.0.1:8000';
+
+      console.log('🔍 Health check...');
+      const healthCheck = await Promise.race([
+        fetch(`${apiBase}/health`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${authContext.token}` },
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Backend timeout')), 5000)
+        )
+      ]).catch(() => {
+        throw new Error('Backend not running on port 8000. Start your Python server first!');
+      });
+
+      if (!(healthCheck as Response).ok) {
+        throw new Error('Backend health check failed');
+      }
+
+      console.log('✅ Health check passed');
+
+      if (!isMountedRef.current) return;
+
+      console.log('👤 Creating assistant...');
+      const assistantRes = await fetch(`${apiBase}/assistants`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${authContext.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          graph_id: 'agent',
+          config: {},
+          metadata: { owner: authContext.uid },
+          if_exists: 'do_nothing',
+          name: 'Companion',
+        }),
+      });
+
+      if (!assistantRes.ok) {
+        const errorText = await assistantRes.text();
+        throw new Error(`Assistant creation failed: ${errorText}`);
+      }
+
+      const { assistant_id } = await assistantRes.json();
+      console.log('✅ Assistant created');
+
+      if (!isMountedRef.current) return;
+
+      console.log('🎙️ Starting voice session...');
+      const voiceRes = await fetch(`${apiBase}/voice/start`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${authContext.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          assistant_id,
+          model: 'gpt-4o-mini',
+        }),
+      });
+
+      if (!voiceRes.ok) {
+        const errorText = await voiceRes.text();
+        throw new Error(`Voice session failed: ${errorText}`);
+      }
+
+      const { room_name, livekit_url, user_token, thread_id } = await voiceRes.json();
+
+      setThreadId(thread_id);
+
+      if (onThreadIdReceived) {
+        onThreadIdReceived(thread_id);
+      }
+
+      console.log('✅ Voice session created - Thread:', thread_id);
+
+      if (!(window as any).livekitModules) {
+        await new Promise((resolve) => {
+          window.addEventListener('voice-modules-loaded', resolve, { once: true });
+        });
+      }
+
+      if (!isMountedRef.current) return;
+
+      const { Room, RoomEvent, createLocalAudioTrack, Track } = (window as any).livekitModules;
+
+      console.log('🏗️ Creating room...');
+      const room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+          channelCount: 1,
+          sampleRate: 24000,
+        },
+        publishDefaults: {
+          audioPreset: {
+            maxBitrate: 64000,
+            priority: 'high',
+          },
+          dtx: true,
+        },
+        reconnectPolicy: {
+          nextRetryDelayInMs: (retries: number) => Math.min(retries * 1000, 5000),
+          maxAttemptsBeforeTimeout: 3,
+        },
+        rtcConfig: {
+          iceServers: [
+            {
+              urls: [
+                'stun:stun.l.google.com:19302',
+                'stun:stun1.l.google.com:19302',
+              ],
+            },
+          ],
+          iceTransportPolicy: 'all',
+        },
+      });
+
+      roomRef.current = room;
+
+      room.on(RoomEvent.TrackSubscribed, (track: any) => {
+        if (!isMountedRef.current) return;
+
+        if (track.kind === Track.Kind.Audio && remoteAudioRef.current) {
+          track.attach(remoteAudioRef.current);
+          setAgentState('speaking');
+        }
+      });
+
+      room.on(RoomEvent.TrackUnsubscribed, (track: any) => {
+        if (!isMountedRef.current) return;
+        if (track.kind === Track.Kind.Audio) {
+          setAgentState('listening');
+        }
+      });
+
+      room.on(RoomEvent.TranscriptionReceived, (segments: any[], participant: any) => {
+        if (!isMountedRef.current) return;
+        segments.forEach((segment: any) => {
+          if (segment.final && segment.text?.trim()) {
+            const isAgent = participant?.identity?.toLowerCase().includes('agent');
+            const speaker = isAgent ? 'Assistant' : 'You';
+            addTranscription(speaker, segment.text);
+
+            if (!isAgent) {
+              setAgentState('thinking');
+            }
+          }
+        });
+      });
+
+      room.on(RoomEvent.Connected, async () => {
+        if (!isMountedRef.current) return;
+        console.log('✅ Room connected');
+        setIsConnected(true);
+        setIsConnecting(false);
+        setAgentState('listening');
+        startVisualizer();
+
+        try {
+          await room.localParticipant.setAttributes({
+            assistant_id,
+            room_name,
+            thread_id,
+          });
+        } catch (e) {
+          console.warn('Failed to set attributes:', e);
+        }
+      });
+
+      // ✅ ENHANCED: Disconnected handler with better logging
+      room.on(RoomEvent.Disconnected, (reason: any) => {
+        if (!isMountedRef.current) return;
+
+        console.log('🔴 ROOM DISCONNECTED EVENT FIRED');
+        console.log('🔴 Disconnect reason:', reason);
+        console.log('🔴 Auto-close enabled:', autoCloseOnEndCall);
+
+        setIsConnected(false);
+        setIsMuted(false);
+        setAgentState('idle');
+        stopVisualizer();
+
+        // Add system message
+        addTranscription('System', 'Agent ended the call');
+
+        // ✅ Schedule auto-close using helper function
+        scheduleAutoClose('agent_disconnect');
+      });
+
+      room.on(RoomEvent.Reconnecting, () => {
+        if (!isMountedRef.current) return;
+        console.log('🔄 Reconnecting...');
+        addTranscription('System', 'Reconnecting...');
+      });
+
+      room.on(RoomEvent.Reconnected, () => {
+        if (!isMountedRef.current) return;
+        console.log('✅ Reconnected');
+        setAgentState('listening');
+        addTranscription('System', 'Reconnected!');
+      });
+
+      room.on(RoomEvent.AudioPlaybackStatusChanged, (status: boolean) => {
+        if (!isMountedRef.current) return;
+        setAgentState(status ? 'speaking' : 'listening');
+      });
+
+      console.log('🔌 Connecting to room...');
+      await room.connect(livekit_url, user_token, {
+        autoSubscribe: true,
+      });
+
+      if (!isMountedRef.current) {
+        room.disconnect();
+        return;
+      }
+
+      console.log('🎤 Creating mic track...');
+      const micTrack = await createLocalAudioTrack({
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+        sampleRate: 24000,
+      });
+
+      micTrackRef.current = micTrack;
+
+      await room.localParticipant.publishTrack(micTrack, {
+        name: 'microphone',
+        stream: 'user-audio',
+      });
+
+      console.log('✅ Voice session fully started');
+
+    } catch (err: any) {
+      const errorMessage = err.message || 'Connection failed';
+      console.error('❌ Error:', errorMessage);
+      if (isMountedRef.current) {
+        setError(errorMessage);
+        setIsConnecting(false);
+        setIsConnected(false);
+        setAgentState('idle');
+        addTranscription('System', errorMessage);
+      }
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      console.log('🧹 Component unmounting, cleaning up...');
+      isMountedRef.current = false;
+
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+
+      // ✅ Clean up close timeout on unmount
+      if (closeTimeoutRef.current) {
+        clearTimeout(closeTimeoutRef.current);
+      }
+
+      stopVisualizer();
+
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
+
+      if (micTrackRef.current) {
+        try {
+          micTrackRef.current.stop();
+        } catch (e) { }
+      }
+
+      if (roomRef.current) {
+        try {
+          roomRef.current.removeAllListeners();
+          roomRef.current.disconnect();
+        } catch (e) { }
+      }
+    };
+  }, []);
+
+  if (!isOpen) return null;
+
+  const getPositionStyles = (): React.CSSProperties => {
+    const styles: React.CSSProperties = {
+      backgroundColor: theme.bg,
+      borderColor: theme.border,
+    };
+
+    if (position !== 'center') {
+      if (popupPosition.top !== undefined) styles.top = `${popupPosition.top}px`;
+      if (popupPosition.bottom !== undefined) styles.bottom = `${popupPosition.bottom}px`;
+      if (popupPosition.left !== undefined) styles.left = `${popupPosition.left}px`;
+      if (popupPosition.right !== undefined) styles.right = `${popupPosition.right}px`;
+    }
+
+    return styles;
+  };
+
+  return (
+    <AnimatePresence>
+      {position === 'center' && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2 }}
+          className="fixed inset-0 bg-black/30 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={onClose}
+        >
+          <motion.div
+            ref={dialogRef}
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            style={{ backgroundColor: theme.bg, borderColor: theme.border }}
+            className="border rounded-3xl shadow-2xl overflow-hidden w-full max-w-md"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {renderContent()}
+          </motion.div>
+        </motion.div>
+      )}
+
+      {position !== 'center' && (
+        <motion.div
+          ref={dialogRef}
+          initial={{ opacity: 0, scale: 0.9, y: 20 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.9, y: 20 }}
+          transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+          className={`fixed border rounded-3xl shadow-2xl overflow-hidden z-[100] w-[90vw] sm:w-[380px] max-w-[380px] ${
+            isDragging ? 'cursor-grabbing select-none' : ''
+          }`}
+          style={getPositionStyles()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {renderContent()}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+
+  function renderContent() {
+    return (
+      <>
+        <audio ref={remoteAudioRef} autoPlay playsInline />
+
+        {/* Header */}
+        <div
+          style={{
+            backgroundColor: theme.bgSecondary,
+            borderColor: theme.border,
+            color: theme.text
+          }}
+          className={`flex items-center justify-between px-4 sm:px-6 py-3.5 border-b ${
+            draggable && position !== 'center' ? 'cursor-grab active:cursor-grabbing' : ''
+          }`}
+          onMouseDown={handleDragStart}
+        >
+          <div className="flex items-center gap-2 sm:gap-3">
+            <div className="relative">
+              <motion.div
+                animate={
+                  agentState === 'speaking'
+                    ? { scale: [1, 1.15, 1] }
+                    : agentState === 'thinking'
+                      ? { rotate: [0, 360] }
+                      : agentState === 'listening'
+                        ? { scale: [1, 1.05, 1] }
+                        : {}
+                }
+                transition={{
+                  repeat: agentState !== 'idle' ? Infinity : 0,
+                  duration: agentState === 'thinking' ? 1.5 : 2,
+                  ease: "easeInOut"
+                }}
+                className={`w-10 h-10 sm:w-12 sm:h-12 rounded-full flex items-center justify-center relative ${
+                  isConnected
+                    ? 'bg-gradient-to-br from-[#a89176] to-[#8b7a63]'
+                    : isDarkMode ? 'bg-[#3a3a3a]' : 'bg-[#d4d0ca]'
+                }`}
+              >
+                <Sparkles className={`w-5 h-5 sm:w-6 sm:h-6 ${
+                  isConnected ? 'text-white' : isDarkMode ? 'text-[#a89176]' : 'text-[#8b8581]'
+                }`} />
+
+                {agentState === 'speaking' && (
+                  <motion.div
+                    animate={{ scale: [1, 1.4], opacity: [0.6, 0] }}
+                    transition={{ repeat: Infinity, duration: 1.5 }}
+                    className="absolute inset-0 rounded-full bg-[#a89176]"
+                  />
+                )}
+              </motion.div>
+
+              {isConnected && (
+                <motion.div
+                  animate={{ scale: [1, 1.2, 1] }}
+                  transition={{ repeat: Infinity, duration: 2 }}
+                  style={{
+                    backgroundColor: '#a89176',
+                    borderColor: theme.bg
+                  }}
+                  className="absolute -bottom-0.5 -right-0.5 w-3 h-3 sm:w-3.5 sm:h-3.5 rounded-full border-2 shadow-lg"
+                />
+              )}
+            </div>
+
+            <div>
+              <h2
+                style={{ color: theme.text }}
+                className="text-sm sm:text-base font-semibold"
+              >
+                Companion
+              </h2>
+              <p
+                style={{ color: theme.textSecondary }}
+                className="text-xs sm:text-sm font-medium"
+              >
+                {isConnected
+                  ? agentState === 'speaking'
+                    ? 'Speaking...'
+                    : agentState === 'thinking'
+                      ? 'Thinking...'
+                      : isMuted
+                        ? 'Muted'
+                        : 'Listening...'
+                  : isConnecting
+                    ? 'Connecting...'
+                    : modulesLoaded ? 'Ready to assist' : 'Loading...'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {draggable && position !== 'center' && (
+              <div
+                className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center rounded-full"
+                style={{
+                  backgroundColor: isDarkMode ? '#3a3a3a' : '#ddd9d3'
+                }}
+              >
+                <Move className="w-4 h-4 sm:w-5 sm:h-5" style={{ color: theme.textSecondary }} />
+              </div>
+            )}
+
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setIsDarkMode(!isDarkMode)}
+              style={{
+                backgroundColor: isDarkMode ? '#3a3a3a' : '#ddd9d3'
+              }}
+              className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center rounded-full transition-colors duration-200"
+              aria-label="Toggle theme"
+            >
+              {isDarkMode ? (
+                <Sun className="w-4 h-4 sm:w-5 sm:h-5 text-[#a89176]" />
+              ) : (
+                <Moon className="w-4 h-4 sm:w-5 sm:h-5 text-[#6b6560]" />
+              )}
+            </motion.button>
+
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={onClose}
+              style={{
+                backgroundColor: isDarkMode ? '#3a3a3a' : '#ddd9d3'
+              }}
+              className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center rounded-full transition-colors duration-200"
+              aria-label="Close"
+            >
+              <X
+                style={{ color: theme.textSecondary }}
+                className="w-4 h-4 sm:w-5 sm:h-5"
+              />
+            </motion.button>
+          </div>
+        </div>
+
+        {/* Messages Area */}
+        <div
+          style={{ backgroundColor: theme.bg }}
+          className="h-[320px] overflow-y-auto px-4 sm:px-6 py-2.5 sm:py-3 custom-scrollbar"
+        >
+          {transcription.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-center px-4">
+              <motion.div
+                animate={{ scale: [1, 1.05, 1] }}
+                transition={{ repeat: Infinity, duration: 3, ease: "easeInOut" }}
+                className="w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-gradient-to-br from-[#a89176]/20 to-[#8b7a63]/10 flex items-center justify-center mb-3.5 relative"
+              >
+                <Mic className="w-7 h-7 sm:w-8 sm:h-8 text-[#a89176]" />
+                <motion.div
+                  animate={{ scale: [1, 1.3], opacity: [0.3, 0] }}
+                  transition={{ repeat: Infinity, duration: 2 }}
+                  className="absolute inset-0 rounded-full bg-[#a89176]"
+                />
+              </motion.div>
+              <h3
+                style={{ color: theme.text }}
+                className="text-base sm:text-lg font-semibold mb-1.5"
+              >
+                Ready to Chat
+              </h3>
+              <p
+                style={{ color: theme.textSecondary }}
+                className="text-xs sm:text-sm max-w-xs leading-relaxed"
+              >
+                Click <span className="text-[#a89176] font-small">"Start"</span> to begin your conversation with the AI assistant
+              </p>
+              {threadId && (
+                <p
+                  style={{ color: theme.textSecondary }}
+                  className="text-xs mt-2 opacity-60"
+                >
+                  Thread: {threadId.substring(0, 12)}...
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2 sm:space-y-3">
+              {transcription.map((item, idx) => (
+                <motion.div
+                  key={idx}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className={`flex ${item.speaker === 'You' ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    style={{
+                      backgroundColor: item.speaker === 'You'
+                        ? '#a89176'
+                        : item.speaker === 'System'
+                          ? theme.systemBg
+                          : theme.messageBg,
+                      color: item.speaker === 'You'
+                        ? 'white'
+                        : theme.text,
+                      borderColor: item.speaker === 'System' || item.speaker === 'Assistant' ? theme.border : 'transparent'
+                    }}
+                    className={`max-w-[85%] px-3 sm:px-4 py-2 sm:py-2.5 rounded-2xl shadow-md ${
+                      item.speaker === 'System' || item.speaker === 'Assistant' ? 'border' : ''
+                    }`}
+                  >
+                    <p className="text-sm sm:text-[15px] leading-relaxed break-words">
+                      {item.text}
+                    </p>
+                    <span className="text-[10px] sm:text-xs mt-1 block opacity-70">
+                      {formatTime(item.timestamp)}
+                    </span>
+                  </div>
+                </motion.div>
+              ))}
+              <div ref={transcriptionEndRef} />
+            </div>
+          )}
+        </div>
+
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="px-4 sm:px-6 py-2 bg-red-50/80 border-t border-red-200"
+          >
+            <p className="text-xs sm:text-sm text-red-700 flex items-center gap-2">
+              <span className="text-base">⚠</span>
+              {error}
+            </p>
+          </motion.div>
+        )}
+
+        {/* Controls */}
+        <div
+          style={{
+            backgroundColor: theme.bgSecondary,
+            borderColor: theme.border
+          }}
+          className="px-4 sm:px-6 py-3 border-t"
+        >
+          <div className="flex items-center justify-center gap-2 sm:gap-12">
+            {!isConnected ? (
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={startVoiceSession}
+                disabled={isConnecting || !modulesLoaded}
+                className="flex items-center gap-3 px-8 py-3 bg-gradient-to-r from-[#a89176] to-[#8b7a63] hover:shadow-xl text-white rounded-full transition-all duration-200 font-semibold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed text-sm sm:text-base"
+              >
+                {isConnecting ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>Connecting...</span>
+                  </>
+                ) : !modulesLoaded ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>Loading...</span>
+                  </>
+                ) : (
+                  <>
+                    <Mic className="w-5 h-5" />
+                    <span>Start</span>
+                  </>
+                )}
+              </motion.button>
+            ) : (
+              <>
+                <div className="relative flex items-center justify-center" style={{ width: '100px', height: '100px' }}>
+                  <canvas
+                    ref={canvasRef}
+                    width="100"
+                    height="100"
+                    className="absolute top-0 left-0"
+                  />
+
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={toggleMute}
+                    className="relative z-10 flex items-center justify-center rounded-full"
+                    style={{
+                      width: '50px',
+                      height: '50px',
+                      background: '#eeefdc',
+                      border: '2px solid #f5f4ce',
+                    }}
+                    aria-label={isMuted ? 'Unmute' : 'Mute'}
+                  >
+                    {!isMuted ? (
+                      <Mic className="w-6 h-6 text-[#a89176]" />
+                    ) : (
+                      <MicOff className="w-6 h-6 text-[#ea5455]" />
+                    )}
+                  </motion.button>
+                </div>
+
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={stopVoiceSession}
+                  className="flex items-center justify-center rounded-full transition-all duration-300"
+                  style={{
+                    width: '46px',
+                    height: '46px',
+                    background: 'linear-gradient(135deg, #ea5455 0%, #ff6b6b 100%)',
+                    boxShadow: '0 6px 20px rgba(234, 84, 85, 0.4)',
+                    border: 'none',
+                  }}
+                  aria-label="End call"
+                >
+                  <PhoneOff className="w-5 h-5 text-white" />
+                </motion.button>
+              </>
+            )}
+          </div>
+        </div>
+      </>
+    );
+  }
+};
